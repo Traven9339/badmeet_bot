@@ -5,7 +5,7 @@ import datetime as dt
 from typing import List, Tuple, Optional
 
 import requests
-from flask import Flask, request, send_file, jsonify
+from flask import Flask, request, send_file, jsonify, render_template
 from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
