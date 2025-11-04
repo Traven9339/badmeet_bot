@@ -1,3 +1,4 @@
+--only-binary=:all:
 --prefer-binary
 Flask==2.3.3
 python-telegram-bot==20.3
