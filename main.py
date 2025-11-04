@@ -288,50 +288,27 @@ def health():
     return jsonify(ok=True, time=str(dt.datetime.utcnow()))
 
 @app.route("/bwf")
-def bwf_calendar():
+def bwf_page():
     """
-    用法：
-    1) 仅生成图片并在浏览器显示（不发 Telegram）
-       https://<your>.onrender.com/bwf?k=<SESSION_SECRET>
-       可选参数: year=2025
-
-    2) 生成后自动发 Telegram（同时浏览器也会显示该图）
-       https://<your>.onrender.com/bwf?k=<SESSION_SECRET>&send=1&year=2025
+    自动从 BWF 官网抓取最新数据并生成网页
     """
-    k = request.args.get("k", "")
-    if not SESSION_SECRET or k != SESSION_SECRET:
-        return "Forbidden", 403
-
     try:
-        year = int(request.args.get("year", dt.datetime.utcnow().year))
-    except Exception:
-        year = dt.datetime.utcnow().year
-
-    events = fetch_bwf_events(year=year, limit=8)
-    img_bytes = make_poster(events, year)
-
-    # 可选：自动把图发到 Telegram
-    if request.args.get("send"):
-        caption = f"BWF World Tour {year}（自动生成）"
-        ok, resp = send_telegram_photo(img_bytes, caption=caption)
-        # 即使 Telegram 失败，浏览器仍然返回图片
-        # 失败时可在响应 Header 里塞一点提示
-        if not ok:
-            # 附加简单 Header 说明失败（不影响显示）
-            @app.after_request
-            def _add_hdr(r):
-                r.headers["X-Telegram"] = f"sendPhoto failed: {resp[:120]}"
-                return r
-
-    # 返回图片到浏览器
-    return send_file(
-        io.BytesIO(img_bytes),
-        mimetype="image/png",
-        as_attachment=False,
-        download_name=f"bwf_{year}.png",
-    )
+        data = fetch_bwf_data()   # 自动抓取最新赛事资料
+        return render_template('bwf.html', data=data)
+    except Exception as e:
+        return f"❌ 抓取失败：{str(e)}", 500
 
 
-if __name__ == "__main__":
-    # 本地调试用；在 Render 上由 gunicorn 启动（你已经设置过）
-    app.run(host="0.0.0.0", port=8080)
+def fetch_bwf_data():
+    import requests
+    from bs4 import BeautifulSoup
+
+    url = "https://bwfworldtour.bwfbadminton.com/calendar/"
+    response = requests.get(url, timeout=10)
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    events = []
+    for item in soup.select(".tournament__name"):
+        events.append(item.text.strip())
+
+    return events
