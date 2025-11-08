@@ -304,7 +304,8 @@ def fetch_bwf_data():
     from bs4 import BeautifulSoup
 
     url = "https://bwfworldtour.bwfbadminton.com/calendar/"
-    response = requests.get(url, timeout=10)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers, timeout=10)
     soup = BeautifulSoup(response.text, "html.parser")
 
     events = []
@@ -312,3 +313,4 @@ def fetch_bwf_data():
         events.append(item.text.strip())
 
     return events
+
