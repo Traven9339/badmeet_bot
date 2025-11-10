@@ -298,38 +298,74 @@ def bwf_page():
     except Exception as e:
         return f"❌ 抓取失败：{str(e)}", 500
 
-
 def fetch_bwf_data():
+    # 替换后的版本：优先用 cloudscraper，绕过 403
     import requests
     from bs4 import BeautifulSoup
 
     url = "https://bwfworldtour.bwfbadminton.com/calendar/"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://bwfworldtour.bwfbadminton.com/",
+        "Upgrade-Insecure-Requests": "1",
+        "DNT": "1",
+    }
 
+    html_text = None
+
+    # 1) 先尝试 cloudscraper（更稳）
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        import cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        resp = scraper.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        html_text = resp.text
     except Exception as e:
-        return [f"❌ 网络请求失败: {str(e)}"]
+        # 2) cloudscraper 失败，再降级普通 requests
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            html_text = resp.text
+        except Exception as e2:
+            # 返回一个“可见的错误项”，方便你在页面看到具体原因
+            return [f"❌ 网络请求失败: {str(e2)}"]
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    # 尝试多个可能的 CSS 选择器
+    # 多选择器兜底（页面结构改动也能抓到）
     selectors = [
-        ".tournament__name",                # 当前网站版本
-        ".event__name",                     # 备用选择器
-        "h4.tournament-title",              # 旧版本可能使用
+        ".tournament__name",   # 现在站点（若前端渲染也可能拿不到）
+        ".event__name",        # 备选
+        "h4.tournament-title", # 旧版
+        "a[href*='tournament']",
     ]
 
     events = []
     for sel in selectors:
-        found = [item.text.strip() for item in soup.select(sel)]
+        found = [it.get_text(strip=True) for it in soup.select(sel)]
         if found:
             events.extend(found)
-            break  # 找到一个有效选择器后立即停止
+            break
 
     if not events:
-        # 如果所有选择器都没找到
-        return [f"⚠️ 网页结构变化，请检查选择器 (URL: {url})"]
+        # 把页面标题也搜一搜，至少返回点可见信息
+        title = soup.title.get_text(strip=True) if soup.title else "(no <title>)"
+        return [f"⚠️ 未解析到赛事名（可能是前端JS渲染）。页面标题: {title}"]
 
-    return events
+    # 去重
+    uniq = []
+    seen = set()
+    for x in events:
+        if x and x not in seen:
+            seen.add(x)
+            uniq.append(x)
+
+    return uniq[:50]  # 防止太长
