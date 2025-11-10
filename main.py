@@ -293,101 +293,111 @@ def bwf_page():
     自动从 BWF 官网抓取最新数据并生成网页
     """
     try:
-        data = fetch_bwf_data()   # 自动抓取最新赛事资料
-        return render_template('bwf.html', data=data)
-    except Exception as e:
-        return f"❌ 抓取失败：{str(e)}", 500
-
-def fetch_bwf_data():
+        data = fetch_bwf_data()   # 自动抓取最新赛事资料def fetch_bwf_data():
     """
-    优先从 BWF World Tour 官网的 WordPress REST API 获取赛事列表。
-    若所有候选端点都不可用，返回带 ❌/⚠️ 的诊断信息（会在 /bwf 页面显示）。
+    兜底C：抓取 HTML（直接/镜像），解析出赛事名称列表
     """
     import requests
+    from bs4 import BeautifulSoup
 
-    # 常见的 WP REST 端点（WordPress 自带 /wp-json/wp/v2/）
-    # BWF 站点可能把赛事注册为自定义 post type（tournament / event / tournaments）
-    endpoints = [
-        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/tournament?per_page=100",
-        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/event?per_page=100",
-        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/tournaments?per_page=100",
-        # 也可以加分类/搜索等备选端点（如需更多可继续追加）
-        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/posts?search=calendar&per_page=100",
-    ]
+    CAL_URL = "https://bwfworldtour.bwfbadminton.com/calendar/"
 
-    headers = {
+    # --- 带基础 headers 的请求 ---
+    BASE_HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "Chrome/122.0.0.0 Safari/537.36"
         ),
-        "Accept": "application/json",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://bwfworldtour.bwfbadminton.com/",
+        "Cache-Control": "no-cache",
     }
 
-    # 收集所有拿到的标题，最后去重
-    collected = []
-    errors = []
-
-    for url in endpoints:
+    def get_html(url: str) -> tuple[str, str]:
+        """
+        返回 (html_text, via)，via 标注走直连还是镜像
+        """
         try:
-            resp = requests.get(url, headers=headers, timeout=12)
-            if resp.status_code == 200:
-                data = resp.json()
-                # data 可能是 list 或包含键 'data' 的对象
-                if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
-                    items = data["data"]
-                elif isinstance(data, list):
-                    items = data
-                else:
-                    items = []
-
-                titles = []
-                for it in items:
-                    # WP 的标题一般在 title.rendered
-                    title = None
-                    if isinstance(it, dict):
-                        if isinstance(it.get("title"), dict):
-                            title = it["title"].get("rendered")
-                        if not title:
-                            # 兜底字段
-                            title = it.get("name") or it.get("post_title") or it.get("slug")
-                    if title:
-                        titles.append(title)
-
-                if titles:
-                    collected.extend(titles)
-                    # 成功拿到就不再尝试后面的端点（也可以注释掉改为合并多个端点）
-                    break
+            r = requests.get(url, headers=BASE_HEADERS, timeout=12)
+            if r.status_code == 200 and r.text.strip():
+                return r.text, "direct"
             else:
-                errors.append(f"⚠️ {resp.status_code} for {url}")
+                # 把错误也做成可读行，方便前端表格展示
+                return f"⚠ {r.status_code} for {url}", "direct_err"
         except Exception as e:
-            errors.append(f"⚠️ {type(e).__name__}: {str(e)} for {url}")
+            return f"⚠ EXC for {url}: {e}", "direct_exc"
 
-    if not collected:
-        # 一个都没拿到——把错误信息返回到页面，方便你排查
-        if errors:
-            return [f"❌ API 未返回数据；详情："] + errors[:5]
-        return ["❌ API 未返回数据（无具体错误，可检查网络/域名/站点结构）"]
+    def get_html_via_mirror(url: str) -> tuple[str, str]:
+        mirror = "https://r.jina.ai/http://"
+        # r.jina.ai 需要 http:// 前缀
+        try:
+            # 目标必须是 http://… 形式
+            if url.startswith("https://"):
+                url_http = "http://" + url[len("https://"):]
+            elif url.startswith("http://"):
+                url_http = url
+            else:
+                url_http = "http://" + url
+            mirror_url = mirror + url_http
+            r = requests.get(mirror_url, headers=BASE_HEADERS, timeout=15)
+            if r.status_code == 200 and r.text.strip():
+                return r.text, "mirror"
+            else:
+                return f"⚠ {r.status_code} for {mirror_url}", "mirror_err"
+        except Exception as e:
+            return f"⚠ EXC for mirror: {e}", "mirror_exc"
 
-    # 简单清洗：去 HTML 标签、空格，过滤出 2025 的赛事名称（也保留部分非 2025 以便你确认）
-    import re
-    clean = []
-    for t in collected:
-        text = re.sub(r"<[^>]+>", "", str(t)).strip()
-        if text:
-            clean.append(text)
+    # 1) 直连抓取
+    html, via = get_html(CAL_URL)
 
-    # 去重并保序
-    seen, uniq = set(), []
-    for x in clean:
+    # 如果直连是纯文本错误或 403，改走镜像
+    need_mirror = (via != "direct") or (isinstance(html, str) and html.startswith("⚠"))
+    if need_mirror:
+        html, via = get_html_via_mirror(CAL_URL)
+
+    # 如果还是失败，返回诊断文本
+    if isinstance(html, str) and html.startswith("⚠"):
+        return [html]  # 前端会把每条当一行显示
+
+    # 2) 解析 HTML
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 多套选择器兜底（新主题 / 旧主题 / 常见列表）
+    selectors = [
+        ".tournament__name",          # 部分主题里用于赛名的 class
+        ".tournament__title",         # 变体
+        ".calendar__item .title",     # 日历卡片标题
+        "h3 a",                       # 常见标题链接
+        "h4 a",
+        "a[href*='/tournament/']",
+    ]
+
+    events = []
+    for sel in selectors:
+        found = [it.get_text(strip=True) for it in soup.select(sel)]
+        found = [x for x in found if x]  # 去空
+        if found:
+            events.extend(found)
+            # 找到一套即可，避免重复
+            break
+
+    if not events:
+        # 实在找不到，给标题做个诊断
+        title = soup.title.get_text(strip=True) if soup.title else "(no <title>)"
+        return [f"⚠ 未解析到赛名（可能是页面结构变化/JS渲染）。页面标题: {title}"]
+
+    # 3) 去重 + 截断，避免过长
+    uniq, seen = [], set()
+    for x in events:
         if x not in seen:
             seen.add(x)
             uniq.append(x)
 
-    # 优先显示包含 2025 的标题，后面再拼一些其余的，避免页面是空
-    year_2025 = [x for x in uniq if "2025" in x]
-    others    = [x for x in uniq if "2025" not in x]
+    return uniq[:50]
 
-    result = (year_2025 + others)[:50]
-    return result if result else ["⚠️ 成功访问 API，但未解析到可展示的标题（可能字段名不同）"]
+        return render_template('bwf.html', data=data)
+    except Exception as e:
+        return f"❌ 抓取失败：{str(e)}", 500
+
