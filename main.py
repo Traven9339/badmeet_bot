@@ -299,97 +299,132 @@ def bwf_page():
     """
     def fetch_bwf_data():
     """
-    自动抓取 BWF 世界羽联官网的赛程数据。
-    优先尝试官方 API，如失败则回退到网页 HTML 抓取。
-    最多返回 50 条赛事名称。
+    返回一个赛事名称字符串列表（最多 50 条），带多重兜底与诊断信息。
+    不在模块顶层 import 第三方，避免部署阶段没装好就报错；函数内部 import。
     """
-
-    # 避免 Render 启动时报错（模块延迟导入）
-    import re
-    import json
     import requests
     from bs4 import BeautifulSoup
 
-    # -----------------------------------
-    # ① API 端点尝试（优先）
-    # -----------------------------------
-    api_urls = [
-        "https://bwfbadminton.com/wp-json/wp/v2/tournament?per_page=100",
-        "https://bwfbadminton.com/wp-json/wp/v2/event?per_page=100",
-        "https://bwfbadminton.com/wp-json/wp/v2/tournaments?per_page=100",
-        "https://bwfbadminton.com/wp-json/wp/v2/posts?search=calendar&per_page=100",
-    ]
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+    # 常用请求头（尽量像真实浏览器）
+    BASE_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://bwfbadminton.com/",
-        "DNT": "1",
         "Cache-Control": "no-cache",
-        "Connection": "close"
+        "Pragma": "no-cache",
+        "Connection": "close",
+        "DNT": "1",
     }
 
-    result = []
+    # WordPress JSON 端点（可能 403，但先试）
+    API_URLS = [
+        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/tournament?per_page=100",
+        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/event?per_page=100",
+        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/tournaments?per_page=100",
+        "https://bwfworldtour.bwfbadminton.com/wp-json/wp/v2/posts?search=calendar&per_page=100",
+    ]
 
-    for url in api_urls:
+    CALENDAR_HTML = "https://bwfworldtour.bwfbadminton.com/calendar/"
+
+    def extract_names_from_json(obj):
+        names = []
+        if isinstance(obj, list):
+            for it in obj:
+                if isinstance(it, dict):
+                    if "title" in it:
+                        t = it["title"]
+                        if isinstance(t, dict):
+                            names.append(str(t.get("rendered", "")).strip())
+                        else:
+                            names.append(str(t).strip())
+                    elif "name" in it:
+                        names.append(str(it["name"]).strip())
+        return [x for x in names if x]
+
+    def try_requests_json(url, headers):
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
-            if resp.status_code == 200:
-                try:
-                    data = resp.json()
-                    if isinstance(data, list) and len(data) > 0:
-                        names = []
-                        for item in data:
-                            name = item.get("title", {}).get("rendered") if isinstance(item.get("title"), dict) else item.get("title")
-                            if name:
-                                # 清理 HTML 标签
-                                name = re.sub(r"<.*?>", "", name)
-                                names.append(name.strip())
-                        if names:
-                            result.extend(names)
-                            break  # 成功后跳出循环
-                except Exception as e:
-                    result.append(f"⚠️ JSON 解析错误 for {url}: {str(e)}")
-            else:
-                result.append(f"⚠️ 403 for {url}")
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 403:
+                return [], f"403 for {url}"
+            r.raise_for_status()
+            return extract_names_from_json(r.json()), None
         except Exception as e:
-            result.append(f"⚠️ 请求失败 for {url}: {str(e)}")
+            return [], f"requests json error for {url}: {e}"
 
-    # -----------------------------------
-    # ② 若 API 全部失败则回退 HTML 抓取
-    # -----------------------------------
-    if not result:
+    def try_requests_html(url, headers):
         try:
-            html_url = "https://bwfworldtour.bwfbadminton.com/calendar/"
-            html_resp = requests.get(html_url, headers=headers, timeout=10)
-            if html_resp.status_code == 200:
-                soup = BeautifulSoup(html_resp.text, "html.parser")
-                selectors = [
-                    ".tournament__name",
-                    ".event__name",
-                    "h4.tournament-title",
-                    "a[href*='tournament']",
-                ]
-                found = []
-                for sel in selectors:
-                    items = [it.get_text(strip=True) for it in soup.select(sel)]
-                    if items:
-                        found.extend(items)
-                        break
+            r = requests.get(url, headers=headers, timeout=12)
+            if r.status_code == 403:
+                return [], f"403 for {url}"
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            selectors = [
+                ".tournament__name",       # 新版
+                ".event__name",            # 备用
+                "h4.tournament-title",     # 旧版
+                "a[href*='tournament']",
+            ]
+            for sel in selectors:
+                found = [el.get_text(strip=True) for el in soup.select(sel)]
                 if found:
-                    result.extend(found[:50])
-                else:
-                    title = soup.title.get_text(strip=True) if soup.title else "(no title)"
-                    result.append(f"⚠️ HTML 未解析到赛事名称。页面标题: {title}")
-            else:
-                result.append(f"❌ HTML 页面状态异常: {html_resp.status_code}")
+                    return found, None
+            title = soup.title.get_text(strip=True) if soup.title else "(no <title>)"
+            return [f"⚠️ 未解析到赛事名（可能前端JS渲染）。页面标题: {title}"], None
         except Exception as e:
-            result.append(f"❌ HTML 抓取错误: {str(e)}")
+            return [], f"requests html error for {url}: {e}"
 
-    # -----------------------------------
-    # ③ 返回结果（防止空列表）
-    # -----------------------------------
-    return result if result else ["❌ 抓取失败或无数据"]
+    results, errors = [], []
+
+    # 1) 先试 cloudscraper（如果可用，可以绕过部分 403）
+    scraper = None
+    try:
+        import cloudscraper  # noqa: F401
+        scraper = cloudscraper.create_scraper()
+    except Exception:
+        scraper = None
+
+    if scraper:
+        for u in API_URLS:
+            try:
+                r = scraper.get(u, headers=BASE_HEADERS, timeout=12)
+                if r.status_code == 403:
+                    errors.append(f"403 for {u}")
+                    continue
+                r.raise_for_status()
+                results.extend(extract_names_from_json(r.json()))
+            except Exception as e:
+                errors.append(f"cloudscraper error for {u}: {e}")
+
+    # 2) 如果还没有结果，使用 requests 直连 API
+    if not results:
+        for u in API_URLS:
+            names, err = try_requests_json(u, BASE_HEADERS)
+            results.extend(names)
+            if err:
+                errors.append(err)
+
+    # 3) 若依旧为空，最后抓取日历 HTML 页面并解析
+    if not results:
+        names, err = try_requests_html(CALENDAR_HTML, BASE_HEADERS)
+        results.extend(names)
+        if err:
+            errors.append(err)
+
+    # 去重并限量
+    uniq, seen = [], set()
+    for x in results:
+        if x and x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    uniq = uniq[:50]
+
+    # 把诊断信息放在最后
+    result = uniq[:]
+    for err in errors:
+        result.append(f"⚠️ {err}")
+
+    return result if result else ["⚠️ API/HTML not readable"]
