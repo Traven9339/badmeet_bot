@@ -297,107 +297,99 @@ def bwf_page():
     """
     兜底C：抓取 HTML（直接/镜像），解析出赛事名称列表
     """
+    def fetch_bwf_data():
+    """
+    自动抓取 BWF 世界羽联官网的赛程数据。
+    优先尝试官方 API，如失败则回退到网页 HTML 抓取。
+    最多返回 50 条赛事名称。
+    """
+
+    # 避免 Render 启动时报错（模块延迟导入）
+    import re
+    import json
     import requests
     from bs4 import BeautifulSoup
 
-    CAL_URL = "https://bwfworldtour.bwfbadminton.com/calendar/"
-
-    # --- 带基础 headers 的请求 ---
-    BASE_HEADERS = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://bwfworldtour.bwfbadminton.com/",
-        "Cache-Control": "no-cache",
-    }
-
-    def get_html(url: str) -> tuple[str, str]:
-        """
-        返回 (html_text, via)，via 标注走直连还是镜像
-        """
-        try:
-            r = requests.get(url, headers=BASE_HEADERS, timeout=12)
-            if r.status_code == 200 and r.text.strip():
-                return r.text, "direct"
-            else:
-                # 把错误也做成可读行，方便前端表格展示
-                return f"⚠ {r.status_code} for {url}", "direct_err"
-        except Exception as e:
-            return f"⚠ EXC for {url}: {e}", "direct_exc"
-
-    def get_html_via_mirror(url: str) -> tuple[str, str]:
-        mirror = "https://r.jina.ai/http://"
-        # r.jina.ai 需要 http:// 前缀
-        try:
-            # 目标必须是 http://… 形式
-            if url.startswith("https://"):
-                url_http = "http://" + url[len("https://"):]
-            elif url.startswith("http://"):
-                url_http = url
-            else:
-                url_http = "http://" + url
-            mirror_url = mirror + url_http
-            r = requests.get(mirror_url, headers=BASE_HEADERS, timeout=15)
-            if r.status_code == 200 and r.text.strip():
-                return r.text, "mirror"
-            else:
-                return f"⚠ {r.status_code} for {mirror_url}", "mirror_err"
-        except Exception as e:
-            return f"⚠ EXC for mirror: {e}", "mirror_exc"
-
-    # 1) 直连抓取
-    html, via = get_html(CAL_URL)
-
-    # 如果直连是纯文本错误或 403，改走镜像
-    need_mirror = (via != "direct") or (isinstance(html, str) and html.startswith("⚠"))
-    if need_mirror:
-        html, via = get_html_via_mirror(CAL_URL)
-
-    # 如果还是失败，返回诊断文本
-    if isinstance(html, str) and html.startswith("⚠"):
-        return [html]  # 前端会把每条当一行显示
-
-    # 2) 解析 HTML
-    soup = BeautifulSoup(html, "html.parser")
-
-    # 多套选择器兜底（新主题 / 旧主题 / 常见列表）
-    selectors = [
-        ".tournament__name",          # 部分主题里用于赛名的 class
-        ".tournament__title",         # 变体
-        ".calendar__item .title",     # 日历卡片标题
-        "h3 a",                       # 常见标题链接
-        "h4 a",
-        "a[href*='/tournament/']",
+    # -----------------------------------
+    # ① API 端点尝试（优先）
+    # -----------------------------------
+    api_urls = [
+        "https://bwfbadminton.com/wp-json/wp/v2/tournament?per_page=100",
+        "https://bwfbadminton.com/wp-json/wp/v2/event?per_page=100",
+        "https://bwfbadminton.com/wp-json/wp/v2/tournaments?per_page=100",
+        "https://bwfbadminton.com/wp-json/wp/v2/posts?search=calendar&per_page=100",
     ]
 
-    events = []
-    for sel in selectors:
-        found = [it.get_text(strip=True) for it in soup.select(sel)]
-        found = [x for x in found if x]  # 去空
-        if found:
-            events.extend(found)
-            # 找到一套即可，避免重复
-            break
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://bwfbadminton.com/",
+        "DNT": "1",
+        "Cache-Control": "no-cache",
+        "Connection": "close"
+    }
 
-    if not events:
-        # 实在找不到，给标题做个诊断
-        title = soup.title.get_text(strip=True) if soup.title else "(no <title>)"
-        return [f"⚠ 未解析到赛名（可能是页面结构变化/JS渲染）。页面标题: {title}"]
+    result = []
 
-    # 3) 去重 + 截断，避免过长
-    uniq, seen = [], set()
-    for x in events:
-        if x not in seen:
-            seen.add(x)
-            uniq.append(x)
+    for url in api_urls:
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        names = []
+                        for item in data:
+                            name = item.get("title", {}).get("rendered") if isinstance(item.get("title"), dict) else item.get("title")
+                            if name:
+                                # 清理 HTML 标签
+                                name = re.sub(r"<.*?>", "", name)
+                                names.append(name.strip())
+                        if names:
+                            result.extend(names)
+                            break  # 成功后跳出循环
+                except Exception as e:
+                    result.append(f"⚠️ JSON 解析错误 for {url}: {str(e)}")
+            else:
+                result.append(f"⚠️ 403 for {url}")
+        except Exception as e:
+            result.append(f"⚠️ 请求失败 for {url}: {str(e)}")
 
-    return uniq[:50]
+    # -----------------------------------
+    # ② 若 API 全部失败则回退 HTML 抓取
+    # -----------------------------------
+    if not result:
+        try:
+            html_url = "https://bwfworldtour.bwfbadminton.com/calendar/"
+            html_resp = requests.get(html_url, headers=headers, timeout=10)
+            if html_resp.status_code == 200:
+                soup = BeautifulSoup(html_resp.text, "html.parser")
+                selectors = [
+                    ".tournament__name",
+                    ".event__name",
+                    "h4.tournament-title",
+                    "a[href*='tournament']",
+                ]
+                found = []
+                for sel in selectors:
+                    items = [it.get_text(strip=True) for it in soup.select(sel)]
+                    if items:
+                        found.extend(items)
+                        break
+                if found:
+                    result.extend(found[:50])
+                else:
+                    title = soup.title.get_text(strip=True) if soup.title else "(no title)"
+                    result.append(f"⚠️ HTML 未解析到赛事名称。页面标题: {title}")
+            else:
+                result.append(f"❌ HTML 页面状态异常: {html_resp.status_code}")
+        except Exception as e:
+            result.append(f"❌ HTML 抓取错误: {str(e)}")
 
-        return render_template('bwf.html', data=data)
-    except Exception as e:
-        return f"❌ 抓取失败：{str(e)}", 500
-
+    # -----------------------------------
+    # ③ 返回结果（防止空列表）
+    # -----------------------------------
+    return result if result else ["❌ 抓取失败或无数据"]
