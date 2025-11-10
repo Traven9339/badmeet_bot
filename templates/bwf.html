@@ -1,12 +1,58 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>BWF World Tour 2025</title>
+  <meta charset="UTF-8">
+  <title>BWF World Tour 2025</title>
+  <style>
+    body {
+      background: #111;
+      color: #eee;
+      font-family: "Segoe UI", sans-serif;
+      text-align: center;
+      padding: 40px;
+    }
+    h1 { color: #00bfff; }
+    table {
+      margin: 30px auto;
+      border-collapse: collapse;
+      width: 90%;
+      max-width: 900px;
+    }
+    th, td {
+      border: 1px solid #444;
+      padding: 10px;
+    }
+    th {
+      background: #222;
+      color: #00ffff;
+    }
+    tr:nth-child(even) { background: #1a1a1a; }
+  </style>
 </head>
-<body style="background:#111;color:white;font-family:sans-serif;text-align:center;padding-top:40px;">
-    <h1>BWF World Tour 2025</h1>
-    <p>✅ Template loaded successfully!</p>
-    <p>Data count: {{ data|length }}</p>
+<body>
+  <h1>BWF World Tour 2025</h1>
+  <p>✅ Template loaded successfully!</p>
+  <p>Data count: {{ data|length }}</p>
+
+  {% if data %}
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Tournament Name</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in data %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td>{{ item }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p>⚠️ No tournament data found.</p>
+  {% endif %}
 </body>
 </html>
