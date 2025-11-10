@@ -305,12 +305,31 @@ def fetch_bwf_data():
 
     url = "https://bwfworldtour.bwfbadminton.com/calendar/"
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(url, headers=headers, timeout=10)
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        return [f"❌ 网络请求失败: {str(e)}"]
+
     soup = BeautifulSoup(response.text, "html.parser")
 
+    # 尝试多个可能的 CSS 选择器
+    selectors = [
+        ".tournament__name",                # 当前网站版本
+        ".event__name",                     # 备用选择器
+        "h4.tournament-title",              # 旧版本可能使用
+    ]
+
     events = []
-    for item in soup.select(".tournament__name"):
-        events.append(item.text.strip())
+    for sel in selectors:
+        found = [item.text.strip() for item in soup.select(sel)]
+        if found:
+            events.extend(found)
+            break  # 找到一个有效选择器后立即停止
+
+    if not events:
+        # 如果所有选择器都没找到
+        return [f"⚠️ 网页结构变化，请检查选择器 (URL: {url})"]
 
     return events
-
